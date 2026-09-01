@@ -191,6 +191,7 @@ async def run_one_async(
     toolset: str = "zapier",
     max_steps: int = DEFAULT_MAX_STEPS,
     timeout: float | None = None,
+    client: Client | None = None,
 ) -> RunResult:
     """Run ONE agent rollout on one task and score it with the benchmark rubric.
 
@@ -199,12 +200,16 @@ async def run_one_async(
     ``skills_dir=None`` is the baseline arm — the skill tools are absent.
     ``timeout`` (seconds) bounds the whole rollout; on expiry the task scores 0
     with ``error="timeout"`` instead of hanging on a stuck API request.
+    ``client`` optionally supplies a pre-built client instead of the cached one
+    ``model`` would resolve to -- an injection point for an instrumented client
+    of the same type; ``None`` keeps the ordinary routing.
     """
     if isinstance(model, str):
         model = ModelSpec(name=model)
     env = get_env(toolset=toolset, skills=skills_dir is not None, max_steps=max_steps)
     set_skills_dir(skills_dir)
-    client = get_client(model)
+    if client is None:
+        client = get_client(model)
     sampling_args = build_sampling_args(model.name, model.resolved_api(), model.reasoning_effort, model.extra_body)
     rollout = env.run_rollout(
         _rollout_input(sample),
@@ -236,11 +241,18 @@ def run_one(
     toolset: str = "zapier",
     max_steps: int = DEFAULT_MAX_STEPS,
     timeout: float | None = None,
+    client: Client | None = None,
 ) -> RunResult:
     """Synchronous wrapper around :func:`run_one_async`."""
     return asyncio.run(
         run_one_async(
-            sample, model=model, skills_dir=skills_dir, toolset=toolset, max_steps=max_steps, timeout=timeout
+            sample,
+            model=model,
+            skills_dir=skills_dir,
+            toolset=toolset,
+            max_steps=max_steps,
+            timeout=timeout,
+            client=client,
         )
     )
 

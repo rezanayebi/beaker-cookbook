@@ -116,6 +116,31 @@ An optimizer loop: run train samples, inspect trajectories/scores, edit
 `skills/**/SKILL.md`, rerun — the environment is reused across calls and picks up
 skill edits immediately. Evaluate on `test` only for final reporting.
 
+That loop is wired up under [`.beaker/`](.beaker): `beaker_integration.py` turns
+one dataset row into one real rollout through `run_one_async`, and declares
+`skills/` as the only editable surface, so a candidate can improve the score
+only by writing better skills. The objective is `partial_credit`;
+`task_completed_correctly` is reported alongside it but does not drive the
+optimization, because at the baseline above it is 0 on almost every task.
+
+Dataset rows name tasks the way `splits/*.txt` do — by `task_name` — and the
+prompt, simulated initial state, and ground-truth assertions all come from the
+pinned `automation-bench` dependency at run time, so the rows stay valid exactly
+as long as that pin and the frozen splits move together. Build and upload one
+with:
+
+```bash
+uv run python .beaker/build_dataset.py --name <dataset> --train 10 --test 5
+```
+
+Each of the task's assertions becomes one check in the sample view, grouped by
+the simulated app it inspects, with record ids replaced by the names the
+workspace shows them under. Assertions that already held before the agent acted
+are marked informational: the benchmark excludes them from scoring so that doing
+nothing earns no credit. Rollouts are traced — tool spans from Beaker's
+`verifiers` integration, one model span per turn from a tracing subclass of the
+client the benchmark's own routing built.
+
 ## Development
 
 ```bash

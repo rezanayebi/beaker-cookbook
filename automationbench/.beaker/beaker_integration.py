@@ -332,6 +332,7 @@ async def score_case(*, case: Case, result: CaseResult, case_files_dir: Path) ->
         )
 
     if not outcomes:
+        # Nothing was evaluated: the rollout ended before the rubric could run.
         checks.append(
             Check(
                 name="Rollout produced a scorable end state",

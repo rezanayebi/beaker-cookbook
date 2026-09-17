@@ -1,8 +1,12 @@
 # AutomationBench + filesystem skills
 
-[AutomationBench](https://github.com/zapier/AutomationBench) ([paper](https://arxiv.org/abs/2604.18934)) is Zapier's benchmark for business automation agents: 600 public tasks in six domains (sales, marketing, operations, support, finance, hr). The agent works in a simulated workspace of SaaS tools (Gmail, Sheets, Slack, CRMs, ...) and is scored by deterministic assertions on the final state of that workspace. Artificial Analysis runs a hosted variant, [AutomationBench-AA](https://artificialanalysis.ai/evaluations/automationbench).
+[AutomationBench](https://github.com/zapier/AutomationBench) ([paper](https://arxiv.org/abs/2604.18934)) is Zapier's benchmark for business automation agents: 600 public tasks in six domains (sales, marketing, operations, support, finance, hr). The agent works in a simulated workspace of SaaS tools (Gmail, Sheets, Slack, CRMs, ...) and is scored by deterministic assertions on the final state of that workspace.
 
-This recipe runs the unmodified benchmark one task at a time (`run_one`) with an agent whose behavior is on disk: a system prompt in `prompts/`, and a `skills/` folder the agent reads through two extra tools, `list_skills` and `read_skill`. Both are read from disk on every call, so Beaker can improve the agent by editing those files between rollouts. The optimizer itself is not part of this recipe.
+This present recipe runs the benchmark one task at a time (`run_one`). The agent uses a system prompt in `prompts/`, and a `skills/` folder it reads through with two tools, `list_skills` and `read_skill`. Both are read from disk on every call, so Beaker can improve the agent by editing those files between rollouts. The optimizer itself is not part of this recipe.
+
+> **The Beaker integration is already present in this recipe.** `.beaker/` holds a
+> working `beaker.yaml` and `beaker_integration.py`; there is nothing to write
+> before pointing Beaker at it.
 
 ## Quick start
 
@@ -27,7 +31,7 @@ still scored on the world it has changed so far.
 
 ## Baseline vs. skills
 
-- **Baseline**: `--no-skills` (or no `--skills-dir`). No skill tools; the
+- **Vanilla**: `--no-skills` (or no `--skills-dir`). No skill tools; the
   system prompt is `prompts/system_no_skills.md`, which ships as the benchmark's
   own prompt.
 - **Skills**: `--skills-dir skills`. The system prompt is `prompts/system.md`
@@ -44,13 +48,13 @@ markdown body). Its ID is its path under `skills/`:
 ```text
 skills/
   domains/{sales,marketing,operations,support,finance,hr}/SKILL.md
-  apps/{gmail,google_sheets,google_drive,slack,salesforce}/SKILL.md
+  apps/{gmail,google_sheets,google_drive,slack,salesforce,intercom,jira}/SKILL.md
 ```
 
-The shipped skills are empty (frontmatter only); filling, adding, splitting and
-merging them is the optimizer's job. `list_skills` returns every ID with its
-description, no filtering. The five seed apps are the most frequent ones in the
-tasks' `zapier_tools`.
+The shipped skills are seeds (frontmatter plus a one-line stub); filling, adding,
+splitting and merging them is the optimizer's job. `list_skills` returns every ID
+with its description, no filtering. The seed apps are the most frequent ones in
+the tasks' `zapier_tools`.
 
 ## Splits
 
@@ -90,33 +94,10 @@ With this harness on the 150-task test split (`gpt-5-mini`,
 | arm | pass_rate | partial_credit |
 |---|---|---|
 | `--no-skills` | 0.013 | 0.221 |
-| `--skills-dir skills` (empty seed skills) | 0.053 | 0.294 |
+| `--skills-dir skills` (seed skills) | 0.053 | 0.294 |
 
-The seed skills are empty, so the gap is mostly run-to-run variance at n=150.
+The seed skills are stubs, so the gap is mostly run-to-run variance at n=150.
 Average a few runs before reading anything into differences this size.
-
-## Beaker integration
-
-```python
-from automationbench_skills import load_split, run_one
-
-sample = load_split("train")[0]
-result = run_one(sample, skills_dir="skills", prompts_dir="prompts")
-result.partial_credit  # 0-1 fraction of assertions passed
-result.task_completed_correctly  # strict 0/1
-result.trajectory  # full message/tool-call trace
-result.end_state  # final simulated WorldState
-```
-
-The loop: run train tasks, look at trajectories and scores, edit
-`skills/**/SKILL.md` and `prompts/*.md`, run again. Edits are picked up
-immediately. Use `test` only for final numbers.
-
-`.beaker/` (`beaker.yaml`, `beaker_integration.py`, `upload_splits.py`) is a
-working Beaker `Integration` (beaker-sdk 0.5): it runs a case, scores it with
-the benchmark's rubric and traces every model call. Start from it rather than
-from scratch. The candidate is `repository(paths=("skills", "prompts", "src"))`,
-i.e. the skill files, the system prompt and the harness.
 
 ### How a case is scored
 

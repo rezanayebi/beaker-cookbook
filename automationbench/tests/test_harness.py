@@ -12,18 +12,32 @@ from fake_client import ScriptedClient
 from automationbench_skills import runner as runner_mod
 from automationbench_skills.data import PUBLIC_DOMAINS, load_samples, load_split, task_family
 from automationbench_skills.evaluation.summary import format_summary, summarize
-from automationbench_skills.runner import STATE_COLUMNS, _rollout_input, _to_result, get_env
+from automationbench_skills.prompts import load_system_prompt, with_system_prompt
+from automationbench_skills.runner import (
+    DEFAULT_REASONING_EFFORT,
+    OPENROUTER_BASE_URL,
+    STATE_COLUMNS,
+    ModelSpec,
+    _rollout_input,
+    _to_result,
+    get_env,
+)
 from automationbench_skills.skills_tools import list_skills, read_skill, set_skills_dir
+
+
+RECIPE_ROOT = Path(__file__).parent.parent
 
 
 def _sample() -> Any:
     return load_split("test")[0]
 
 
-async def _rollout(client: ScriptedClient, *, skills: bool, sample: Any = None) -> dict[str, Any]:
+async def _rollout(
+    client: ScriptedClient, *, skills: bool, sample: Any = None, system_prompt: str | None = None
+) -> dict[str, Any]:
     env = get_env(skills=skills)
     return await env.run_rollout(
-        _rollout_input(sample or _sample()),
+        _rollout_input(sample or _sample(), system_prompt),
         client,
         "scripted-model",
         {},
@@ -85,7 +99,7 @@ class TestSkillsTools:
         assert "unknown skill" in message.lower() and "apps/gmail" in message
 
     def test_shipped_seed_stubs(self) -> None:
-        shipped = Path(__file__).parent.parent / "skills"
+        shipped = RECIPE_ROOT / "skills"
         set_skills_dir(shipped)
         listing = list_skills()
         for domain in PUBLIC_DOMAINS:
@@ -95,7 +109,80 @@ class TestSkillsTools:
         assert "unknown skill" not in read_skill("apps/gmail").lower()
 
 
+class TestPrompts:
+    def test_file_replaces_the_system_message_and_keeps_the_task(self) -> None:
+        prompt = [{"role": "system", "content": "BENCHMARK PROMPT"}, {"role": "user", "content": "do the task"}]
+        out = with_system_prompt(prompt, "OURS")
+        assert out == [{"role": "system", "content": "OURS"}, prompt[1]]
+        assert prompt[0]["content"] == "BENCHMARK PROMPT"
+        assert with_system_prompt(prompt, None) is prompt
+        assert with_system_prompt(prompt, "") is prompt
+        assert with_system_prompt("plain", "OURS") == "plain"
+        assert with_system_prompt([prompt[1]], "OURS") == [{"role": "system", "content": "OURS"}, prompt[1]]
+
+    def test_load_reads_live_and_tolerates_absence(self, tmp_path: Path) -> None:
+        assert load_system_prompt(None) is None
+        assert load_system_prompt(tmp_path) is None
+        (tmp_path / "system.md").write_text("  \n")
+        assert load_system_prompt(tmp_path) is None
+        (tmp_path / "system.md").write_text("first\n")
+        assert load_system_prompt(tmp_path) == "first"
+        (tmp_path / "system.md").write_text("second\n")
+        assert load_system_prompt(tmp_path) == "second"
+        assert load_system_prompt(tmp_path, skills=False) is None
+        (tmp_path / "system_no_skills.md").write_text("plain\n")
+        assert load_system_prompt(tmp_path, skills=False) == "plain"
+        assert load_system_prompt(tmp_path) == "second"
+
+    def test_shipped_seeds_start_with_the_benchmark_prompt_verbatim(self) -> None:
+        upstream = {s.prompt[0]["content"] for s in load_split("train") + load_split("test")}
+        assert len(upstream) == 1
+        benchmark = upstream.pop().strip()
+        assert load_system_prompt(RECIPE_ROOT / "prompts", skills=False) == benchmark
+        text = load_system_prompt(RECIPE_ROOT / "prompts")
+        assert text is not None
+        assert text.startswith(benchmark)
+        for domain in PUBLIC_DOMAINS:
+            assert domain in text
+        assert "list_skills" in text and "read_skill" in text
+
+
 class TestRunner:
+    def test_openrouter_routing(self) -> None:
+        openrouter = ModelSpec(name="z-ai/glm-5.3-flash", reasoning_effort="max")
+        assert openrouter.is_openrouter()
+        assert openrouter.resolved_api() == "chat_completions"
+        assert openrouter.effective_base_url() == OPENROUTER_BASE_URL
+        assert openrouter.effective_api_key_var() == "OPENROUTER_API_KEY"
+        assert openrouter.sampling_args() == {"extra_body": {"reasoning": {"effort": "max"}}}
+
+        qwen = ModelSpec(name="qwen/qwen3.8-flash", reasoning_effort="default", reasoning_enabled=True)
+        assert qwen.sampling_args() == {"extra_body": {"reasoning": {"enabled": True}}}
+
+        native = ModelSpec(name="gpt-6-astra")
+        assert not native.is_openrouter()
+        assert native.effective_api_key_var() == "OPENAI_API_KEY"
+        assert native.sampling_args() == {"reasoning_effort": DEFAULT_REASONING_EFFORT}
+
+        explicit = ModelSpec(name="z-ai/glm-5.3-flash", api_key_var="CUSTOM_API_KEY")
+        assert explicit.effective_api_key_var() == "CUSTOM_API_KEY"
+
+    def test_record_cost_reads_openrouter_usage(self) -> None:
+        from types import SimpleNamespace
+
+        import pytest
+        from openai.types import CompletionUsage
+
+        from automationbench_skills.clients import record_cost
+
+        usage = CompletionUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2, cost=0.0123)
+        response = SimpleNamespace(usage=usage)
+        state: dict[str, Any] = {}
+        record_cost(state, response)
+        record_cost(state, response)
+        assert state["_perf"]["cost_usd"] == pytest.approx(0.0246)
+        record_cost(None, response)
+
     async def test_baseline_has_no_skill_tools(self) -> None:
         client = ScriptedClient()
         output = await _rollout(client, skills=False)
@@ -125,6 +212,19 @@ class TestRunner:
         assert "How to do the thing" in dump
         assert "SECRET-PROCEDURE" in dump
 
+    async def test_system_prompt_reaches_the_model(self) -> None:
+        sample = _sample()
+        baseline = ScriptedClient()
+        await _rollout(baseline, skills=True, sample=sample)
+        ours = ScriptedClient()
+        await _rollout(ours, skills=True, sample=sample, system_prompt="READ YOUR SKILLS FIRST")
+        base_system = baseline.calls[0]["prompt"][0]
+        system = ours.calls[0]["prompt"][0]
+        assert base_system.role == system.role == "system"
+        assert base_system.content == sample.prompt[0]["content"]
+        assert system.content == "READ YOUR SKILLS FIRST"
+        assert ours.calls[0]["prompt"][1:] == baseline.calls[0]["prompt"][1:]
+
     async def test_state_resets_between_rollouts(self) -> None:
         sample = _sample()
         out1 = await _rollout(ScriptedClient(), skills=False, sample=sample)
@@ -137,17 +237,38 @@ class TestRunner:
         assert r1.end_state is not None and r2.end_state is not None
         assert set(r1.end_state) == set(r2.end_state)
 
-    async def test_task_timeout_returns_error_result(self, monkeypatch: Any) -> None:
+    async def test_task_timeout_scores_the_work_done_so_far(self, monkeypatch: Any) -> None:
         import asyncio
 
         class StallingClient(ScriptedClient):
-            async def get_native_response(self, *args: Any, **kwargs: Any) -> Any:
-                await asyncio.sleep(30)
+            """Acts once, then hangs like a stuck API request."""
 
-        monkeypatch.setattr(runner_mod, "get_client", lambda model: StallingClient())
-        result = await runner_mod.run_one_async(_sample(), skills_dir=None, timeout=0.2)
-        assert result.error is not None and "timeout" in str(result.error)
-        assert result.partial_credit == 0.0 and result.task_completed_correctly == 0.0
+            async def get_native_response(self, *args: Any, **kwargs: Any) -> Any:
+                response = await super().get_native_response(*args, **kwargs)
+                if len(self.calls) > 1:
+                    await asyncio.sleep(30)
+                return response
+
+        client = StallingClient(turns=[{"tool_calls": [{"name": "search_tools", "arguments": {"query": "email"}}]}])
+        monkeypatch.setattr(runner_mod, "get_client", lambda model: client)
+        result = await runner_mod.run_one_async(_sample(), skills_dir=None, timeout=0.5)
+        # The env stops its loop and the rubric still grades the world, so the
+        # rollout keeps its trajectory and whatever credit it earned.
+        assert len(client.calls) == 2  # the second call is the one that hangs
+        assert result.error is None
+        assert result.end_state is not None
+        assert [m["role"] for m in result.trajectory] == ["assistant"]
+        assert 0.0 <= result.partial_credit <= 1.0
+
+    async def test_result_records_latency_and_usage(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(runner_mod, "get_client", lambda model: ScriptedClient())
+        result = await runner_mod.run_one_async(_sample(), skills_dir=None)
+        assert isinstance(result.latency_s, float) and result.latency_s > 0
+        assert result.cost_usd is None
+        assert isinstance(result.usage, dict)
+        assert isinstance(result.perf, dict)
+        serialized = result.to_json()
+        assert {"latency_s", "cost_usd", "usage", "perf"} <= serialized.keys()
 
     def test_client_cache_is_per_event_loop(self, monkeypatch: Any) -> None:
         import asyncio
@@ -179,6 +300,39 @@ class TestRunner:
         with pytest.raises(ValueError):
             get_env(toolset="limited_zapier", skills=True)
 
+    async def test_tool_executions_become_tool_spans(self, tmp_path: Path) -> None:
+        from beaker.tracing import local_capture
+        from beaker.tracing.integrations import verifiers as beaker_verifiers
+        from beaker.tracing.projection import parse_jsonl, project
+
+        env = get_env(skills=True)
+        assert beaker_verifiers.is_instrumented(env)
+        client = ScriptedClient(
+            turns=[
+                {"tool_calls": [{"name": "list_skills"}]},
+                {"tool_calls": [{"name": "search_tools", "arguments": {"query": "send email", "top_k": 1}}]},
+                {"content": "done"},
+            ]
+        )
+        with local_capture(tmp_path, case_id="case", candidate_id="cand", strict_evidence=False) as capture:
+            await _rollout(client, skills=True)
+        assert capture.receipt is not None
+        projection = capture.receipt.to_dict()["projection"]
+        assert projection["tool_counts"] == {"list_skills": 1, "search_tools": 1}
+        by_name = {call["tool_name"]: call for call in projection["tool_calls"]}
+        assert by_name["search_tools"]["args"] == {"query": "send email", "top_k": 1}
+        assert by_name["search_tools"]["tool_call_id"]
+        assert "world" not in by_name["search_tools"]["args"]
+        assert by_name["list_skills"]["return_content"]
+        # a second rollout on the same cached env is traced independently
+        with local_capture(tmp_path / "second", case_id="case", candidate_id="cand", strict_evidence=False) as again:
+            await _rollout(ScriptedClient(), skills=True)
+        assert again.receipt is not None
+        assert again.receipt.to_dict()["projection"]["tool_counts"] == {}
+        captures = list((tmp_path / "captures").glob("*.otlp.jsonl"))
+        assert len(captures) == 1
+        assert project(parse_jsonl(captures[0].read_bytes()), artifacts=()).tool_counts == projection["tool_counts"]
+
     async def test_run_split_concurrency(self, monkeypatch: Any) -> None:
         samples = load_split("test")[:3]
         client = ScriptedClient()
@@ -192,12 +346,33 @@ class TestRunner:
 class TestSummary:
     def test_summarize_and_format(self) -> None:
         rows = [
-            {"domain": "sales", "task_completed_correctly": 1.0, "partial_credit": 1.0},
-            {"domain": "sales", "task_completed_correctly": 0.0, "partial_credit": 0.5},
+            {
+                "domain": "sales",
+                "task_completed_correctly": 1.0,
+                "partial_credit": 1.0,
+                "latency_s": 2.0,
+                "cost_usd": 0.0123,
+            },
+            {
+                "domain": "sales",
+                "task_completed_correctly": 0.0,
+                "partial_credit": 0.5,
+                "latency_s": 4.0,
+                "cost_usd": 0.0456,
+            },
             {"domain": "hr", "task_completed_correctly": 0.0, "partial_credit": 0.0},
         ]
         summary = summarize(rows)
-        assert summary["domains"]["sales"] == {"tasks": 2, "pass_rate": 0.5, "partial_credit": 0.75}
+        assert summary["domains"]["sales"] == {
+            "tasks": 2,
+            "pass_rate": 0.5,
+            "partial_credit": 0.75,
+            "avg_latency_s": 3.0,
+            "avg_cost_usd": 0.02895,
+        }
+        assert summary["domains"]["hr"]["avg_latency_s"] is None
+        assert summary["domains"]["hr"]["avg_cost_usd"] is None
         assert summary["overall"]["tasks"] == 3
         text = format_summary(summary)
         assert "overall" in text and "sales" in text
+        assert "3.0" in text and "0.0290" in text and "-" in text

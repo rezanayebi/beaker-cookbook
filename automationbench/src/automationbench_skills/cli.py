@@ -13,23 +13,46 @@ from typing import Any
 from dotenv import load_dotenv
 
 from automationbench_skills.evaluation.summary import format_summary, summarize
-from automationbench_skills.runner import DEFAULT_MAX_STEPS, DEFAULT_MODEL, ModelSpec, RunResult, run_split
+from automationbench_skills.runner import (
+    DEFAULT_MAX_STEPS,
+    DEFAULT_MODEL,
+    DEFAULT_REASONING_EFFORT,
+    ModelSpec,
+    RunResult,
+    run_split,
+)
 
 
 def _add_run_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--split", choices=["train", "test"], default="test")
     p.add_argument("--skills-dir", type=Path, default=None, help="Skills directory of SKILL.md folders (read live)")
     p.add_argument("--no-skills", action="store_true", help="Baseline arm: no skill tools registered")
+    p.add_argument(
+        "--prompts-dir",
+        type=Path,
+        default=None,
+        help="Directory holding the agent's system prompt: system.md, or system_no_skills.md with --no-skills (read live)",
+    )
     p.add_argument("--model", default=DEFAULT_MODEL)
-    p.add_argument("--reasoning-effort", default=None)
+    p.add_argument(
+        "--reasoning-effort", default=DEFAULT_REASONING_EFFORT, help="reasoning level; 'default' sends none"
+    )
+    p.add_argument("--reasoning-enabled", action="store_true", default=None)
     p.add_argument("--base-url", default=None, help="OpenAI-compatible gateway base URL")
-    p.add_argument("--api-key-var", default="OPENAI_API_KEY")
+    p.add_argument(
+        "--api-key-var",
+        default="OPENAI_API_KEY",
+        help="API key environment variable (default OPENAI_API_KEY, OPENROUTER_API_KEY for OpenRouter models)",
+    )
     p.add_argument("--api", default="auto", help="auto|chat_completions|responses|anthropic|gemini_interactions")
     p.add_argument("--toolset", choices=["zapier", "api"], default="zapier")
     p.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS)
     p.add_argument("--max-concurrent", type=int, default=8)
     p.add_argument(
-        "--task-timeout", type=float, default=None, help="Per-task rollout timeout in seconds (scores 0 on expiry)"
+        "--task-timeout",
+        type=float,
+        default=None,
+        help="Per-task rollout timeout in seconds (the partial world is still scored)",
     )
     p.add_argument("--limit", type=int, default=None, help="Run only the first N tasks of the split")
     p.add_argument("--output-dir", type=Path, default=None, help="Default: runs/<split>-<timestamp>")
@@ -47,6 +70,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if skills_dir is not None and not skills_dir.is_dir():
         print(f"error: --skills-dir {skills_dir} is not a directory", file=sys.stderr)
         return 2
+    prompts_dir: Path | None = args.prompts_dir
+    if prompts_dir is not None and not prompts_dir.is_dir():
+        print(f"error: --prompts-dir {prompts_dir} is not a directory", file=sys.stderr)
+        return 2
 
     samples = load_split(args.split)
     if args.limit is not None:
@@ -60,6 +87,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         api_key_var=args.api_key_var,
         api=args.api,
         reasoning_effort=args.reasoning_effort,
+        reasoning_enabled=args.reasoning_enabled,
     )
     (output_dir / "config.json").write_text(
         json.dumps(
@@ -67,12 +95,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "split": args.split,
                 "limit": args.limit,
                 "model": model.name,
-                "base_url": model.base_url,
+                "base_url": model.effective_base_url(),
                 "api": model.api,
                 "reasoning_effort": model.reasoning_effort,
+                "reasoning_enabled": model.reasoning_enabled,
                 "toolset": args.toolset,
                 "max_steps": args.max_steps,
                 "skills_dir": str(skills_dir) if skills_dir else None,
+                "prompts_dir": str(prompts_dir) if prompts_dir else None,
                 "tasks": [s.task_name for s in samples],
             },
             indent=2,
@@ -92,6 +122,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         samples,
         model=model,
         skills_dir=skills_dir,
+        prompts_dir=prompts_dir,
         toolset=args.toolset,
         max_steps=args.max_steps,
         max_concurrent=args.max_concurrent,

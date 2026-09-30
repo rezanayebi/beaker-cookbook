@@ -55,11 +55,19 @@ the tasks' `zapier_tools`.
 
 ## Splits
 
-`splits/train.txt` (450 tasks) and `splits/test.txt` (150 tasks) are a fixed
-75/25 split per domain, stratified by task family. See
-[`splits/README.md`](src/automationbench_skills/splits/README.md) for how they
-were made. The 200-task `simple` domain
-(`splits/simple.txt`) is train-only and never scored.
+We reviewed AutomationBench's task instructions, metadata, and grader code and
+identified **108 cases with data-integrity defects**. The loader excludes these
+cases before use, yielding **381 train and 111 test cases**, with case order and
+split membership preserved. Exclusions address defective tasks or grading, not
+case difficulty or agent performance.
+
+See [exclusion reasons and source links](src/automationbench_skills/splits/EXCLUSIONS.md)
+for the evidence and [split documentation](src/automationbench_skills/splits/README.md)
+for counts, generation, and held-out evaluation.
+
+`uv run python .beaker/upload_splits.py` uses the first six train and three test
+cases per domain from the filtered splits: **54 cases (36 train / 18 test)**.
+Hosted datasets change only when uploaded.
 
 ## Models
 
@@ -89,7 +97,7 @@ Upstream reports strict pass rates (`task_completed_correctly`) of roughly
 number, which adds guardrail and hidden-task components and uses a different
 harness.
 
-With this harness on the 150-task test split (`--max-concurrent 16`, one seed;
+Historical result on the original, unfiltered 150-task test split (`--max-concurrent 16`, one seed;
 skills arm uses `--skills-dir skills`, the seed skills):
 
 | model | arm | pass_rate | partial_credit |

@@ -43,13 +43,11 @@ def task_family(task_name: str) -> str:
 
 
 @cache
-def load_samples(include_simple: bool = False) -> tuple[Sample, ...]:
-    """Build every public task (plus optionally the unscored ``simple`` domain)
-    in the benchmark's own deterministic order."""
+def load_samples() -> tuple[Sample, ...]:
+    """Build the 600 public tasks in the benchmark's own deterministic order."""
     from automationbench.domains import get_combined_dataset
 
-    domains = PUBLIC_DOMAINS + (["simple"] if include_simple else [])
-    dataset = get_combined_dataset(domains)
+    dataset = get_combined_dataset(PUBLIC_DOMAINS)
     samples: list[Sample] = []
     for index, row in enumerate(dataset):
         info = row["info"]
@@ -86,10 +84,12 @@ def read_split_names(split: str) -> list[str]:
 
 
 def load_split(split: str) -> list[Sample]:
-    """Load the frozen ``train``/``test`` split (or the optional unscored
-    ``simple`` extra-training list) as Samples, in split-file order."""
+    """Load eligible train/test cases in frozen split order."""
     names = read_split_names(split)
-    by_name = {s.task_name: s for s in load_samples(include_simple=split == "simple")}
+    if split in {"train", "test"}:
+        excluded = set(read_split_names("excluded_cases"))
+        names = [name for name in names if name not in excluded]
+    by_name = {s.task_name: s for s in load_samples()}
     missing = [n for n in names if n not in by_name]
     if missing:
         raise ValueError(

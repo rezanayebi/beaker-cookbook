@@ -4,8 +4,6 @@
 held-out tasks are stratified across task families (``task_family``: the first
 underscore token of the task name) by largest-remainder allocation over each
 family's share of the domain, with a fixed-seed shuffle inside each family.
-``simple.txt`` lists the 200 unscored ``simple``-domain tasks as optional
-extra *training* material only.
 
 Regenerate with ``uv run python -m automationbench_skills.data.make_splits``
 (only meaningful when the pinned automation-bench dependency changes).
@@ -50,8 +48,8 @@ def _allocate_largest_remainder(counts: dict[str, int], total: int) -> dict[str,
     return alloc
 
 
-def make_splits() -> tuple[list[str], list[str], list[str]]:
-    samples = load_samples(include_simple=True)
+def make_splits() -> tuple[list[str], list[str]]:
+    samples = load_samples()
     by_domain: dict[str, list[Sample]] = defaultdict(list)
     for s in samples:
         by_domain[s.domain].append(s)
@@ -74,13 +72,12 @@ def make_splits() -> tuple[list[str], list[str], list[str]]:
         test.extend(s.task_name for s in domain_samples if s.task_name in domain_test)
         train.extend(s.task_name for s in domain_samples if s.task_name not in domain_test)
 
-    simple = [s.task_name for s in by_domain["simple"]]
-    return train, test, simple
+    return train, test
 
 
 def main() -> None:
-    train, test, simple = make_splits()
-    for name, names in (("train", train), ("test", test), ("simple", simple)):
+    train, test = make_splits()
+    for name, names in (("train", train), ("test", test)):
         path = split_path(name)
         path.write_text("".join(f"{n}\n" for n in names))
         print(f"wrote {path} ({len(names)} tasks)")
